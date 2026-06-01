@@ -1,0 +1,12 @@
+.env
+tokens/
+google_client_secret.json
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.streamlit/secrets.toml
+.idea/
+.vscode/
