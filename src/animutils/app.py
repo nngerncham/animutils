@@ -134,7 +134,7 @@ if ss.episodes is None:
 
 col_refresh, col_push = st.columns([1, 1])
 with col_refresh:
-    if st.button("🔄 Refresh from MAL", use_container_width=True):
+    if st.button("🔄 Refresh from MAL", width="stretch"):
         try:
             _fetch()
         except Exception as exc:
@@ -186,7 +186,7 @@ with st.expander("📋 Episode list", expanded=False):
             }
             for e in episodes
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -194,7 +194,7 @@ with col_push:
     sync_clicked = st.button(
         "📅 Sync to Google Calendar (red, popup at start)",
         type="primary",
-        use_container_width=True,
+        width="stretch",
     )
 
 if sync_clicked:
