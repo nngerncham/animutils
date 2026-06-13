@@ -1,6 +1,6 @@
-"""Streamlit dashboard: MAL watchlist → calendar → Google Calendar push.
+"""Streamlit dashboard: MAL watchlist → calendar → Google Calendar sync.
 
-Credentials come from .env; auth flows run automatically on first launch.
+Credentials come from .env; auth dialogs are shown in-UI (no terminal links).
 """
 
 from __future__ import annotations
@@ -31,6 +31,10 @@ st.title("📺 Currently Watching — Episode Calendar")
 ss = st.session_state
 ss.setdefault("episodes", None)
 ss.setdefault("entries", None)
+ss.setdefault("mal_auth_url", None)
+ss.setdefault("mal_complete_fn", None)
+ss.setdefault("gcal_auth_url", None)
+ss.setdefault("gcal_complete_fn", None)
 
 MAL_CLIENT_ID = os.environ.get("MAL_CLIENT_ID", "").strip()
 MAL_CLIENT_SECRET = os.environ.get("MAL_CLIENT_SECRET", "").strip()
@@ -42,7 +46,6 @@ GOOGLE_CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "primary").strip()
 
 
 def _ensure_google_client_secret() -> bool:
-    """Copy the configured client_secret JSON into tokens/ if not already there."""
     if gcal.has_client_secret():
         return True
     src = Path(GOOGLE_CLIENT_SECRET_FILE)
@@ -56,7 +59,84 @@ def _ensure_google_client_secret() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Auto-auth on first launch
+# Auth dialogs
+# ---------------------------------------------------------------------------
+
+@st.dialog("🔐 Authenticate with MyAnimeList", width="large")
+def _mal_auth_dialog():
+    # Start the flow only once per dialog open.
+    if ss.mal_auth_url is None:
+        try:
+            url, complete_fn = mal_auth.start_auth_flow(
+                MAL_CLIENT_ID, MAL_CLIENT_SECRET, MAL_REDIRECT_URI
+            )
+            ss.mal_auth_url = url
+            ss.mal_complete_fn = complete_fn
+        except Exception as exc:
+            st.error(f"Could not start MAL auth flow: {exc}")
+            return
+
+    st.markdown(
+        "**Step 1 —** Click the button below to open the MyAnimeList authorization page "
+        "(opens in a new tab)."
+    )
+    st.link_button("Open MyAnimeList Authorization →", ss.mal_auth_url)
+
+    with st.expander("Or copy the URL manually"):
+        st.code(ss.mal_auth_url, language=None)
+
+    st.markdown("**Step 2 —** Complete authorization in your browser. This dialog closes automatically.")
+    st.divider()
+
+    with st.spinner("Waiting for authorization…"):
+        try:
+            ss.mal_complete_fn()
+        except Exception as exc:
+            st.error(f"Authorization failed: {exc}")
+        finally:
+            ss.mal_auth_url = None
+            ss.mal_complete_fn = None
+
+    st.rerun()
+
+
+@st.dialog("🔐 Authenticate with Google Calendar", width="large")
+def _gcal_auth_dialog():
+    if ss.gcal_auth_url is None:
+        try:
+            url, complete_fn = gcal.start_auth_flow()
+            ss.gcal_auth_url = url
+            ss.gcal_complete_fn = complete_fn
+        except Exception as exc:
+            st.error(f"Could not start Google auth flow: {exc}")
+            return
+
+    st.markdown(
+        "**Step 1 —** Click the button below to open the Google authorization page "
+        "(opens in a new tab)."
+    )
+    st.link_button("Open Google Authorization →", ss.gcal_auth_url)
+
+    with st.expander("Or copy the URL manually"):
+        st.code(ss.gcal_auth_url, language=None)
+
+    st.markdown("**Step 2 —** Complete authorization in your browser. This dialog closes automatically.")
+    st.divider()
+
+    with st.spinner("Waiting for authorization…"):
+        try:
+            ss.gcal_complete_fn()
+        except Exception as exc:
+            st.error(f"Authorization failed: {exc}")
+        finally:
+            ss.gcal_auth_url = None
+            ss.gcal_complete_fn = None
+
+    st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Guard: env vars
 # ---------------------------------------------------------------------------
 
 missing_env = [
@@ -71,14 +151,17 @@ if missing_env:
     st.error(f"Missing in .env: {', '.join(missing_env)}. Fill them in and reload.")
     st.stop()
 
+# ---------------------------------------------------------------------------
+# Guard: MAL auth
+# ---------------------------------------------------------------------------
+
 if not mal_auth.has_token():
-    st.info("Opening browser to authenticate with MyAnimeList…")
-    try:
-        mal_auth.run_authorization_code_flow(MAL_CLIENT_ID, MAL_CLIENT_SECRET, MAL_REDIRECT_URI)
-        st.rerun()
-    except Exception as exc:
-        st.error(f"MAL auth failed: {exc}")
-        st.stop()
+    _mal_auth_dialog()
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Guard: Google client secret + auth
+# ---------------------------------------------------------------------------
 
 if not _ensure_google_client_secret():
     st.error(
@@ -89,23 +172,18 @@ if not _ensure_google_client_secret():
     st.stop()
 
 if not gcal.has_token():
-    st.info("Opening browser to authenticate with Google Calendar…")
-    try:
-        gcal.authenticate()
-        st.rerun()
-    except Exception as exc:
-        st.error(f"Google auth failed: {exc}")
-        st.stop()
+    _gcal_auth_dialog()
+    st.stop()
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: status + reset
+# Sidebar: status + re-auth
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
     st.header("🔐 Auth status")
     st.success("MyAnimeList ✅")
-    st.success(f"Google Calendar ✅  (calendar: `{GOOGLE_CALENDAR_ID}`)")
+    st.success(f"Google Calendar ✅  (`{GOOGLE_CALENDAR_ID}`)")
     if st.button("Re-authenticate MAL"):
         mal_auth.clear_token()
         st.rerun()
@@ -115,7 +193,7 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Auto-fetch on first load
+# Data
 # ---------------------------------------------------------------------------
 
 def _fetch():
@@ -132,7 +210,8 @@ if ss.episodes is None:
         st.error(f"Failed to load from MyAnimeList: {exc}")
         st.stop()
 
-col_refresh, col_push = st.columns([1, 1])
+col_refresh, col_sync = st.columns([1, 1])
+
 with col_refresh:
     if st.button("🔄 Refresh from MAL", width="stretch"):
         try:
@@ -149,6 +228,10 @@ if not episodes:
 st.caption(
     f"{len(episodes)} upcoming episodes across {len({e.anime_id for e in episodes})} series."
 )
+
+# ---------------------------------------------------------------------------
+# Calendar
+# ---------------------------------------------------------------------------
 
 cal_events = [
     {
@@ -190,9 +273,13 @@ with st.expander("📋 Episode list", expanded=False):
         hide_index=True,
     )
 
-with col_push:
+# ---------------------------------------------------------------------------
+# Sync
+# ---------------------------------------------------------------------------
+
+with col_sync:
     sync_clicked = st.button(
-        "📅 Sync to Google Calendar (red, popup at start)",
+        "📅 Sync to Google Calendar (Flamingo, popup at start)",
         type="primary",
         width="stretch",
     )

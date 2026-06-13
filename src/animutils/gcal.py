@@ -1,9 +1,14 @@
-"""Push episode events to Google Calendar (red, popup at start)."""
+"""Push episode events to Google Calendar (Flamingo, popup at start)."""
 
 from __future__ import annotations
 
+import socket
+import threading
+import wsgiref.simple_server
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -17,6 +22,10 @@ TOKEN_PATH = Path("tokens/gcal_token.json")
 CLIENT_SECRET_PATH = Path("tokens/google_client_secret.json")
 FLAMINGO_COLOR_ID = "4"  # Flamingo
 
+
+# ---------------------------------------------------------------------------
+# Credential helpers
+# ---------------------------------------------------------------------------
 
 def has_client_secret() -> bool:
     return CLIENT_SECRET_PATH.exists()
@@ -35,14 +44,61 @@ def clear_token() -> None:
     TOKEN_PATH.unlink(missing_ok=True)
 
 
-def authenticate() -> None:
-    """Run the installed-app OAuth flow (opens a browser)."""
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("localhost", 0))
+        return s.getsockname()[1]
+
+
+def start_auth_flow() -> tuple[str, Callable[[], None]]:
+    """Return (auth_url, complete_fn).
+
+    Display auth_url in the UI, then call complete_fn() to block until the
+    user completes the browser flow. Saves credentials on success.
+    """
     if not CLIENT_SECRET_PATH.exists():
-        raise RuntimeError("Upload your Google OAuth client_secret JSON first.")
+        raise RuntimeError("Google client secret JSON not found — upload it first.")
+
+    port = _free_port()
+    redirect_uri = f"http://localhost:{port}/"
+
     flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
-    creds = flow.run_local_server(port=0)
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(creds.to_json())
+    flow.redirect_uri = redirect_uri
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+
+    received: dict[str, str] = {}
+    done = threading.Event()
+
+    class _SilentHandler(wsgiref.simple_server.WSGIRequestHandler):
+        def log_message(self, *_):
+            pass
+
+    def _wsgi_app(environ, start_response):
+        qs = environ.get("QUERY_STRING", "")
+        path = environ.get("PATH_INFO", "/")
+        received["url"] = f"http://localhost:{port}{path}?{qs}"
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+        done.set()
+        return [
+            b"<html><body><h2>Authorization complete.</h2>"
+            b"<p>You may close this tab and return to the app.</p></body></html>"
+        ]
+
+    server = wsgiref.simple_server.make_server(
+        "localhost", port, _wsgi_app, handler_class=_SilentHandler
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def complete() -> None:
+        done.wait()
+        server.shutdown()
+        # google-auth-oauthlib requires the response URL to look like HTTPS
+        auth_response = received["url"].replace("http://", "https://", 1)
+        flow.fetch_token(authorization_response=auth_response)
+        TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_PATH.write_text(flow.credentials.to_json())
+
+    return auth_url, complete
 
 
 def _credentials() -> Credentials:
@@ -61,6 +117,10 @@ def _credentials() -> Credentials:
 def _service():
     return build("calendar", "v3", credentials=_credentials(), cache_discovery=False)
 
+
+# ---------------------------------------------------------------------------
+# Event construction
+# ---------------------------------------------------------------------------
 
 def _event_body(ep: EpisodeAir) -> dict:
     start = ep.airs_at_local
@@ -89,6 +149,10 @@ def _event_body(ep: EpisodeAir) -> dict:
         },
     }
 
+
+# ---------------------------------------------------------------------------
+# Sync
+# ---------------------------------------------------------------------------
 
 def _existing_events(svc, calendar_id: str, anime_id: int) -> list[dict]:
     """Return full event dicts for events tagged with this anime."""
@@ -176,15 +240,12 @@ def sync_episodes(
                 ).execute()
                 item["colorId"] = FLAMINGO_COLOR_ID
                 n = ep_num(item)
-                label = f"{titles.get(anime_id, str(anime_id))} · Ep {n}"
-                recolored.append(label)
+                recolored.append(f"{titles.get(anime_id, str(anime_id))} · Ep {n}")
 
-    # Collect existing episodes across all cached anime (may include anime not
-    # yet fetched for insertion — fetch on demand below).
     def existing_ep_nums(anime_id: int) -> set[int]:
         return {n for item in existing(anime_id) if (n := ep_num(item)) is not None}
 
-    # Insert any new episodes, recoloring is already handled above.
+    # Insert new episodes.
     for ep in episodes:
         label = f"{ep.title} · Ep {ep.episode}"
         if ep.episode in existing_ep_nums(ep.anime_id):
@@ -194,7 +255,7 @@ def sync_episodes(
         cache[ep.anime_id].append(created)
         inserted.append(label)
 
-    # Recolor newly fetched anime (fetched during insertion but not yet recolored).
+    # Recolor any events fetched during insertion that slipped through.
     for anime_id, items in cache.items():
         for item in items:
             if item.get("colorId") != FLAMINGO_COLOR_ID:
