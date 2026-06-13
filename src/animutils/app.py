@@ -155,8 +155,8 @@ cal_events = [
         "title": f"{e.title} · Ep {e.episode}",
         "start": e.airs_at_local.isoformat(),
         "end": e.airs_at_local.isoformat(),
-        "backgroundColor": "#d50000",
-        "borderColor": "#d50000",
+        "backgroundColor": "#F691B2",
+        "borderColor": "#F691B2",
     }
     for e in episodes
 ]
@@ -223,13 +223,17 @@ if sync_clicked:
         else:
             st.success(
                 f"Inserted {len(result['inserted'])}, "
+                f"recolored {len(result['recolored'])}, "
                 f"deleted {len(result['deleted'])} trailing, "
                 f"skipped {len(result['skipped'])} already-present. "
-                f"Color: Tomato (colorId={gcal.RED_COLOR_ID}); reminder: popup at event start."
+                f"Color: Flamingo (colorId={gcal.FLAMINGO_COLOR_ID}); reminder: popup at event start."
             )
             if result["inserted"]:
                 with st.expander(f"➕ Inserted ({len(result['inserted'])})"):
                     st.write(result["inserted"])
+            if result["recolored"]:
+                with st.expander(f"🎨 Recolored ({len(result['recolored'])})"):
+                    st.write(result["recolored"])
             if result["deleted"]:
                 with st.expander(f"🗑 Deleted trailing ({len(result['deleted'])})"):
                     st.write(result["deleted"])

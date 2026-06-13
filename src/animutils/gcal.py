@@ -15,7 +15,7 @@ from animutils.schedule import DEFAULT_EPISODE_MINUTES, EpisodeAir
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 TOKEN_PATH = Path("tokens/gcal_token.json")
 CLIENT_SECRET_PATH = Path("tokens/google_client_secret.json")
-RED_COLOR_ID = "11"  # Tomato
+FLAMINGO_COLOR_ID = "4"  # Flamingo
 
 
 def has_client_secret() -> bool:
@@ -76,7 +76,7 @@ def _event_body(ep: EpisodeAir) -> dict:
         ),
         "start": {"dateTime": start.isoformat(), "timeZone": tz_name},
         "end": {"dateTime": end.isoformat(), "timeZone": tz_name},
-        "colorId": RED_COLOR_ID,
+        "colorId": FLAMINGO_COLOR_ID,
         "reminders": {
             "useDefault": False,
             "overrides": [{"method": "popup", "minutes": 0}],
@@ -90,9 +90,9 @@ def _event_body(ep: EpisodeAir) -> dict:
     }
 
 
-def _existing_events(svc, calendar_id: str, anime_id: int) -> list[tuple[str, int]]:
-    """Return [(event_id, episode_number), ...] for events tagged with this anime."""
-    out: list[tuple[str, int]] = []
+def _existing_events(svc, calendar_id: str, anime_id: int) -> list[dict]:
+    """Return full event dicts for events tagged with this anime."""
+    out: list[dict] = []
     page_token = None
     while True:
         resp = (
@@ -107,12 +107,7 @@ def _existing_events(svc, calendar_id: str, anime_id: int) -> list[tuple[str, in
             )
             .execute()
         )
-        for item in resp.get("items", []):
-            props = (item.get("extendedProperties") or {}).get("private") or {}
-            try:
-                out.append((item["id"], int(props["animutils_episode"])))
-            except (KeyError, ValueError):
-                continue
+        out.extend(resp.get("items", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
             return out
@@ -127,47 +122,91 @@ def sync_episodes(
     """Sync episodes to Google Calendar.
 
     - Inserts events for new (anime_id, episode) pairs.
-    - Skips events already present.
-    - For each anime_id in `final_counts` whose value > 0, deletes any existing
-      event whose episode number exceeds that total — i.e. trailing projected
-      episodes that turned out not to exist once MAL published the real count.
+    - Patches colorId on existing events whose color differs from FLAMINGO_COLOR_ID.
+    - Deletes trailing projected episodes when MAL publishes a final episode count.
     """
     final_counts = final_counts or {}
     titles = titles or {}
     svc = _service()
 
-    cache: dict[int, list[tuple[str, int]]] = {}
+    cache: dict[int, list[dict]] = {}
 
-    def existing(anime_id: int) -> list[tuple[str, int]]:
+    def existing(anime_id: int) -> list[dict]:
         if anime_id not in cache:
             cache[anime_id] = _existing_events(svc, calendar_id, anime_id)
         return cache[anime_id]
 
+    def ep_num(item: dict) -> int | None:
+        try:
+            return int(
+                (item.get("extendedProperties") or {})
+                .get("private", {})
+                .get("animutils_episode", "")
+            )
+        except ValueError:
+            return None
+
     inserted: list[str] = []
     skipped: list[str] = []
     deleted: list[str] = []
+    recolored: list[str] = []
 
     # Trim trailing episodes whose anime now has a known final count.
     for anime_id, total in final_counts.items():
         if total <= 0:
             continue
-        keep: list[tuple[str, int]] = []
-        for event_id, ep in existing(anime_id):
-            if ep > total:
-                svc.events().delete(calendarId=calendar_id, eventId=event_id).execute()
-                deleted.append(f"{titles.get(anime_id, anime_id)} · Ep {ep}")
+        keep: list[dict] = []
+        for item in existing(anime_id):
+            n = ep_num(item)
+            if n is not None and n > total:
+                svc.events().delete(calendarId=calendar_id, eventId=item["id"]).execute()
+                deleted.append(f"{titles.get(anime_id, anime_id)} · Ep {n}")
             else:
-                keep.append((event_id, ep))
+                keep.append(item)
         cache[anime_id] = keep
 
-    # Insert any new episodes.
+    # Recolor existing events that have a different colorId.
+    for anime_id, items in cache.items():
+        for item in items:
+            if item.get("colorId") != FLAMINGO_COLOR_ID:
+                svc.events().patch(
+                    calendarId=calendar_id,
+                    eventId=item["id"],
+                    body={"colorId": FLAMINGO_COLOR_ID},
+                ).execute()
+                item["colorId"] = FLAMINGO_COLOR_ID
+                n = ep_num(item)
+                label = f"{titles.get(anime_id, str(anime_id))} · Ep {n}"
+                recolored.append(label)
+
+    # Collect existing episodes across all cached anime (may include anime not
+    # yet fetched for insertion — fetch on demand below).
+    def existing_ep_nums(anime_id: int) -> set[int]:
+        return {n for item in existing(anime_id) if (n := ep_num(item)) is not None}
+
+    # Insert any new episodes, recoloring is already handled above.
     for ep in episodes:
-        existing_eps = {n for _, n in existing(ep.anime_id)}
         label = f"{ep.title} · Ep {ep.episode}"
-        if ep.episode in existing_eps:
+        if ep.episode in existing_ep_nums(ep.anime_id):
             skipped.append(label)
             continue
         created = svc.events().insert(calendarId=calendar_id, body=_event_body(ep)).execute()
-        cache[ep.anime_id].append((created["id"], ep.episode))
+        cache[ep.anime_id].append(created)
         inserted.append(label)
-    return {"inserted": inserted, "skipped": skipped, "deleted": deleted}
+
+    # Recolor newly fetched anime (fetched during insertion but not yet recolored).
+    for anime_id, items in cache.items():
+        for item in items:
+            if item.get("colorId") != FLAMINGO_COLOR_ID:
+                svc.events().patch(
+                    calendarId=calendar_id,
+                    eventId=item["id"],
+                    body={"colorId": FLAMINGO_COLOR_ID},
+                ).execute()
+                item["colorId"] = FLAMINGO_COLOR_ID
+                n = ep_num(item)
+                label = f"{titles.get(anime_id, str(anime_id))} · Ep {n}"
+                if label not in recolored:
+                    recolored.append(label)
+
+    return {"inserted": inserted, "skipped": skipped, "deleted": deleted, "recolored": recolored}
