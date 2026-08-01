@@ -6,7 +6,7 @@ import socket
 import threading
 import wsgiref.simple_server
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -177,10 +177,20 @@ def _existing_events(svc, calendar_id: str, anime_id: int) -> list[dict]:
             return out
 
 
+def _is_future_event(item: dict) -> bool:
+    dt_str = (item.get("start") or {}).get("dateTime")
+    if not dt_str:
+        return False
+    start_dt = datetime.fromisoformat(dt_str)
+    now = datetime.now(start_dt.tzinfo) if start_dt.tzinfo else datetime.now()
+    return start_dt >= now
+
+
 def sync_episodes(
     episodes: list[EpisodeAir],
     final_counts: dict[int, int] | None = None,
     titles: dict[int, str] | None = None,
+    dropped_anime_ids: set[int] | None = None,
     calendar_id: str = "primary",
 ) -> dict[str, list[str]]:
     """Sync episodes to Google Calendar.
@@ -188,9 +198,12 @@ def sync_episodes(
     - Inserts events for new (anime_id, episode) pairs.
     - Patches colorId on existing events whose color differs from FLAMINGO_COLOR_ID.
     - Deletes trailing projected episodes when MAL publishes a final episode count.
+    - Deletes future (not-yet-aired) events for anime that were dropped, leaving
+      past episodes as watch history.
     """
     final_counts = final_counts or {}
     titles = titles or {}
+    dropped_anime_ids = dropped_anime_ids or set()
     svc = _service()
 
     cache: dict[int, list[dict]] = {}
@@ -223,6 +236,18 @@ def sync_episodes(
         for item in existing(anime_id):
             n = ep_num(item)
             if n is not None and n > total:
+                svc.events().delete(calendarId=calendar_id, eventId=item["id"]).execute()
+                deleted.append(f"{titles.get(anime_id, anime_id)} · Ep {n}")
+            else:
+                keep.append(item)
+        cache[anime_id] = keep
+
+    # Drop future (unaired) episodes for anime that were dropped on MAL.
+    for anime_id in dropped_anime_ids:
+        keep = []
+        for item in existing(anime_id):
+            if _is_future_event(item):
+                n = ep_num(item)
                 svc.events().delete(calendarId=calendar_id, eventId=item["id"]).execute()
                 deleted.append(f"{titles.get(anime_id, anime_id)} · Ep {n}")
             else:

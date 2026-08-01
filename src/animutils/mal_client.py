@@ -19,12 +19,12 @@ def _headers(client_id: str, client_secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {get_access_token(client_id, client_secret)}"}
 
 
-def fetch_watching(client_id: str, client_secret: str) -> list[dict[str, Any]]:
-    """Return all entries on @me's list with status='watching'."""
+def _fetch_by_status(client_id: str, client_secret: str, status: str) -> list[dict[str, Any]]:
+    """Return all entries on @me's list with the given list status."""
     items: list[dict[str, Any]] = []
     url: str | None = (
         f"{API_BASE}/users/@me/animelist"
-        f"?status=watching&limit=1000&nsfw=true&fields={WATCHING_FIELDS}"
+        f"?status={status}&limit=1000&nsfw=true&fields={WATCHING_FIELDS}"
     )
     headers = _headers(client_id, client_secret)
     while url:
@@ -34,6 +34,16 @@ def fetch_watching(client_id: str, client_secret: str) -> list[dict[str, Any]]:
         items.extend(payload.get("data", []))
         url = payload.get("paging", {}).get("next")
     return items
+
+
+def fetch_watching(client_id: str, client_secret: str) -> list[dict[str, Any]]:
+    """Return all entries on @me's list with status='watching'."""
+    return _fetch_by_status(client_id, client_secret, "watching")
+
+
+def fetch_dropped(client_id: str, client_secret: str) -> list[dict[str, Any]]:
+    """Return all entries on @me's list with status='dropped'."""
+    return _fetch_by_status(client_id, client_secret, "dropped")
 
 
 def fetch_currently_airing(client_id: str, client_secret: str) -> list[dict[str, Any]]:

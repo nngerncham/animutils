@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from streamlit_calendar import calendar
 
 from animutils import gcal, mal_auth
-from animutils.mal_client import fetch_currently_airing
+from animutils.mal_client import fetch_currently_airing, fetch_dropped
 from animutils.schedule import EpisodeAir, compute_episodes
 
 load_dotenv()
@@ -31,6 +31,7 @@ st.title("📺 Currently Watching — Episode Calendar")
 ss = st.session_state
 ss.setdefault("episodes", None)
 ss.setdefault("entries", None)
+ss.setdefault("dropped_entries", None)
 ss.setdefault("mal_auth_url", None)
 ss.setdefault("mal_complete_fn", None)
 ss.setdefault("gcal_auth_url", None)
@@ -201,6 +202,7 @@ def _fetch():
         entries = fetch_currently_airing(MAL_CLIENT_ID, MAL_CLIENT_SECRET)
         ss.entries = entries
         ss.episodes = [asdict(e) for e in compute_episodes(entries)]
+        ss.dropped_entries = fetch_dropped(MAL_CLIENT_ID, MAL_CLIENT_SECRET)
 
 
 if ss.episodes is None:
@@ -297,12 +299,22 @@ if sync_clicked:
         if total > 0:
             final_counts[anime_id] = total
 
+    dropped_anime_ids: set[int] = set()
+    for entry in ss.dropped_entries or []:
+        node = entry.get("node") or {}
+        anime_id = node.get("id")
+        if anime_id is None:
+            continue
+        dropped_anime_ids.add(anime_id)
+        titles.setdefault(anime_id, node.get("title", str(anime_id)))
+
     with st.spinner("Syncing with Google Calendar…"):
         try:
             result = gcal.sync_episodes(
                 episodes,
                 final_counts=final_counts,
                 titles=titles,
+                dropped_anime_ids=dropped_anime_ids,
                 calendar_id=GOOGLE_CALENDAR_ID,
             )
         except Exception as exc:
@@ -311,7 +323,7 @@ if sync_clicked:
             st.success(
                 f"Inserted {len(result['inserted'])}, "
                 f"recolored {len(result['recolored'])}, "
-                f"deleted {len(result['deleted'])} trailing, "
+                f"deleted {len(result['deleted'])} (trailing/dropped), "
                 f"skipped {len(result['skipped'])} already-present. "
                 f"Color: Flamingo (colorId={gcal.FLAMINGO_COLOR_ID}); reminder: popup at event start."
             )
@@ -322,7 +334,7 @@ if sync_clicked:
                 with st.expander(f"🎨 Recolored ({len(result['recolored'])})"):
                     st.write(result["recolored"])
             if result["deleted"]:
-                with st.expander(f"🗑 Deleted trailing ({len(result['deleted'])})"):
+                with st.expander(f"🗑 Deleted ({len(result['deleted'])})"):
                     st.write(result["deleted"])
             if result["skipped"]:
                 with st.expander(f"⏭ Skipped ({len(result['skipped'])})"):
